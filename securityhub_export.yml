@@ -4,6 +4,8 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: Export Security Hub findings to a central s3 bucket.  Findings are stored in AWSLogs/account_id/product/region/ direrctory
 Resources:
+  LambdaDeadLetterQueue:
+    Type: AWS::SQS::Queue
   SecurityHubLogBucket:
     Type: 'AWS::S3::Bucket'
     DependsOn:
@@ -92,7 +94,7 @@ Resources:
             - !Ref SecurityHubLogBucket
         BufferingHints:
           IntervalInSeconds: '900'
-          SizeInMBs: '128'
+          SizeInMBs: '20'
         CompressionFormat: UNCOMPRESSED
         Prefix: raw/firehose/
         RoleARN: !GetAtt FirehoseDeliveryRole.Arn
@@ -117,6 +119,10 @@ Resources:
       PolicyDocument:
         Version: 2012-10-17
         Statement:
+          - Effect: Allow
+            Action:
+              - "sqs:*"
+            Resource: !Sub ${LambdaDeadLetterQueue.Arn}
           - Effect: Allow
             Action:
               - 's3:AbortMultipartUpload'
@@ -182,10 +188,8 @@ Resources:
                       else:
                           product_name = item['resources'][0].split('/')[2]
                           findings = item['detail']['findings'][0]
-                          #region = item['resources'][0].split('/')[3]
                           if 'Region' in findings:
                               region = findings['Region']
-                          #account_id = item['resources'][0].split('/')[4]
                           if 'AwsAccountId' in findings:
                               account_id = findings['AwsAccountId']
                       key = account_id + '/' + product_name + '/'+region
@@ -209,6 +213,8 @@ Resources:
       Description: Function sorts findings by AWS account id/product/region
       MemorySize: 128
       Timeout: 300
+      DeadLetterConfig:
+        TargetArn: !Sub ${LambdaDeadLetterQueue.Arn}
       Role:
         'Fn::GetAtt':
           - LambdaSortRole
@@ -228,7 +234,67 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/AWSLambdaExecute'
+  LambdaSortRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: LambdaSortRolePolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sqs:*"
+            Resource: !Sub ${LambdaDeadLetterQueue.Arn}
+      Roles:
+        - !Ref LambdaSortRole
+  LambdaSortAlarmSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "Topic_${LambdaSortFindings}"
+  LambdaCriticalErrorAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub 'Lambda Critical Error Alarm for ${LambdaSortFindings}'
+      AlarmName: !Sub '${LambdaSortFindings}-Lambda-Critical-Error-Alarm'
+      AlarmActions:
+        - !Ref LambdaSortAlarmSNS
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Threshold: 0.25
+      DatapointsToAlarm: 1
+      Metrics:
+        - Id: !Sub "errorPercentage_LambdaSortFindings"
+          Expression: !Sub "errors_LambdaSortFindings / requests_LambdaSortFindings * 100"
+          Label: !Sub "${LambdaSortFindings}-ErrorPercentage"
+          ReturnData: true
+        - Id: !Sub "errors_LambdaSortFindings"
+          MetricStat:
+            Metric:
+              Namespace: "AWS/Lambda"
+              MetricName: "Errors"
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub '${LambdaSortFindings}'
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: !Sub "requests_LambdaSortFindings"
+          MetricStat:
+            Metric:
+              Namespace: "AWS/Lambda"
+              MetricName: "Invocations"
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Sub '${LambdaSortFindings}'
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+      TreatMissingData: missing
 Outputs:
   S3BucketName:
     Description: Name of the bucket used for storing logs
     Value: !Ref SecurityHubLogBucket
+  FunctionName:
+    Description: Name of the Lambda function
+    Value: !Sub '${LambdaSortFindings}'

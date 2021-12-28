@@ -3,6 +3,26 @@
 
 AWSTemplateFormatVersion: 2010-09-09
 Description: Export Security Hub findings to a central s3 bucket.  Findings are stored in AWSLogs/account_id/product/region/ direrctory
+Parameters:
+  AlarmSubscriptionEmail:
+    Type: String
+    Description: Email target of Alarm notification.
+  SecurityHubFirehoseBufferIntervalSeconds:
+    Type: String
+    Description: Firehose buffer interval.
+    Default: 900
+  SecurityHubFirehoseBufferSizeMB:
+    Type: String
+    Description: Firehose buffer size.
+    Default: 20
+  LambdaSortFindingsMemoryMB:
+    Type: String
+    Description: Lambda Memory.
+    Default: 128
+  LambdaSortFindingsTimeout:
+    Type: String
+    Description: Lambda Timeout.
+    Default: 300
 Resources:
   LambdaDeadLetterQueue:
     Type: AWS::SQS::Queue
@@ -93,8 +113,8 @@ Resources:
           - - 'arn:aws:s3:::'
             - !Ref SecurityHubLogBucket
         BufferingHints:
-          IntervalInSeconds: '900'
-          SizeInMBs: '20'
+          IntervalInSeconds: !Ref SecurityHubFirehoseBufferIntervalSeconds
+          SizeInMBs: !Ref SecurityHubFirehoseBufferSizeMB
         CompressionFormat: UNCOMPRESSED
         Prefix: raw/firehose/
         RoleARN: !GetAtt FirehoseDeliveryRole.Arn
@@ -211,8 +231,8 @@ Resources:
       Handler: index.handler
       Runtime: python3.7
       Description: Function sorts findings by AWS account id/product/region
-      MemorySize: 128
-      Timeout: 300
+      MemorySize: !Ref LambdaSortFindingsMemoryMB
+      Timeout: !Ref LambdaSortFindingsTimeout
       DeadLetterConfig:
         TargetArn: !Sub ${LambdaDeadLetterQueue.Arn}
       Role:
@@ -251,6 +271,12 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub "Topic_${LambdaSortFindings}"
+  LambdaSortAlarmSNSSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref LambdaSortAlarmSNS
+      Endpoint: !Ref AlarmSubscriptionEmail
+      Protocol: email-json
   LambdaCriticalErrorAlarm:
     Type: 'AWS::CloudWatch::Alarm'
     Properties:
@@ -261,7 +287,7 @@ Resources:
         - !Ref LambdaSortAlarmSNS
       ComparisonOperator: GreaterThanOrEqualToThreshold
       EvaluationPeriods: 1
-      Threshold: 0.25
+      Threshold: 0.1
       DatapointsToAlarm: 1
       Metrics:
         - Id: !Sub "errorPercentage_LambdaSortFindings"
@@ -298,3 +324,12 @@ Outputs:
   FunctionName:
     Description: Name of the Lambda function
     Value: !Sub '${LambdaSortFindings}'
+  DeadLetterQueue:
+    Description: Name of Dead Letter Queue
+    Value: !Sub '${LambdaDeadLetterQueue}'
+  LambdaErrorAlram:
+    Description: Lambda Alarm
+    Value: !Sub '${LambdaCriticalErrorAlarm}'
+  NotificationTopic:
+    Description: Alarm Notification Topic
+    Value: !Sub '${LambdaSortAlarmSNS}'
